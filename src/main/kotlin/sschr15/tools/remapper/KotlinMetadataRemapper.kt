@@ -152,12 +152,15 @@ private fun remapOne(
     overrides: Map<String, String>
 ): String {
     var newSig = mapping
+    overrides.forEach { (toReplace, replaced) ->
+        newSig = newSig.replace(toReplace, replaced)
+    }
+
     while (newSig.contains("net/minecraft/" + if (isHashed) "unmapped/C_" else "class_")) {
         val firstUnmappedIdx = newSig.indexOf("net/minecraft/" + if (isHashed) "unmapped/C_" else "class_")
         val lastUnmappedIdx = newSig.indexOf(';', firstUnmappedIdx)
         val unmapped = newSig.substring(firstUnmappedIdx until lastUnmappedIdx)
-        val mapped = overrides[unmapped]
-            ?: mappingTree.classes.find { it.getName(if (isHashed) "hashed" else "intermediary") == unmapped }
+        val mapped = mappingTree.classes.find { it.getName(if (isHashed) "hashed" else "intermediary") == unmapped }
                 ?.getRawName("named")
                 ?.takeIf(String::isNotEmpty)
             ?: unmapped.replace("net", "ne\u0000t")
