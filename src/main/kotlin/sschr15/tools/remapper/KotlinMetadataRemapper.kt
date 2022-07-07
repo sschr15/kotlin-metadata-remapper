@@ -14,13 +14,14 @@ import kotlin.io.path.*
 import kotlin.system.exitProcess
 
 fun main(args: Array<String>) {
-    if (args.size != 2) {
-        println("Requires two args: file or dir, mapping file")
+    if (args.size < 2) {
+        println("Requires at least two args: file or dir, mapping file, optional overrides")
         exitProcess(1)
     }
 
     val path = Path(args[0]).toAbsolutePath()
     val mappingFile = Path(args[1]).toAbsolutePath()
+    val overrides = (if (args.size > 2) args.drop(2) else emptyList()).map { it.split('=') }.associate { it[0] to it[1] }
     val firstLine = mappingFile.readLines().first()
     val isHashed = firstLine.contains("hashed")
     val mapping = mappingFile.bufferedReader().use(TinyMappingFactory::loadWithDetection)
@@ -34,7 +35,7 @@ fun main(args: Array<String>) {
     path.copyToRecursivelyIfNeeded(backup)
     println("Backup created: $backup")
 
-    val result = Files.walk(path).use { p -> p.map { recurse(it, mapping, isHashed) }.toList().any { it } }
+    val result = Files.walk(path).use { p -> p.map { recurse(it, mapping, isHashed, overrides) }.toList().any { it } }
 
     if (result) {
         println("One or more annotations were remapped")
@@ -49,12 +50,18 @@ fun main(args: Array<String>) {
 /**
  * @return whether any remapping was done
  */
-private fun recurse(path: Path, mapping: TinyTree, isHashed: Boolean, output: JarOutputStream? = null): Boolean = when (path.extension) {
+private fun recurse(
+    path: Path,
+    mapping: TinyTree,
+    isHashed: Boolean,
+    overrides: Map<String, String>,
+    output: JarOutputStream? = null
+): Boolean = when (path.extension) {
     "jar" -> {
         val temp = createTempFile(suffix = ".jar")
         val result = temp.outputStream().use { os -> JarOutputStream(os).use { jos ->
             FileSystems.newFileSystem(path).use { fs ->
-                Files.walk(fs.getPath("/")).use { p -> p.map { recurse(it, mapping, isHashed, jos) }.toList().any { it } }
+                Files.walk(fs.getPath("/")).use { p -> p.map { recurse(it, mapping, isHashed, overrides, jos) }.toList().any { it } }
             }
         } }
         if (!result) {
@@ -77,7 +84,7 @@ private fun recurse(path: Path, mapping: TinyTree, isHashed: Boolean, output: Ja
         }.also { temp.deleteExisting() }
     }
     "class" -> {
-        val out = remap(path, mapping, isHashed, output)
+        val out = remap(path, mapping, isHashed, overrides, output)
         if (!out && output != null) {
             output.putNextEntry(ZipEntry(path.absoluteWithoutLeadingSlash))
             output.write(path.readBytes())
@@ -98,7 +105,13 @@ private fun recurse(path: Path, mapping: TinyTree, isHashed: Boolean, output: Ja
 /**
  * @return whether any remapping was done (in case nothing changes, it doesn't copy files without a reason)
  */
-private fun remap(path: Path, mapping: TinyTree, isHashed: Boolean, output: JarOutputStream?): Boolean {
+private fun remap(
+    path: Path,
+    mapping: TinyTree,
+    isHashed: Boolean,
+    overrides: Map<String, String>,
+    output: JarOutputStream?
+): Boolean {
     val node = ClassNode()
     path.inputStream().use { ClassReader(it).accept(node, 0) }
 
@@ -110,7 +123,7 @@ private fun remap(path: Path, mapping: TinyTree, isHashed: Boolean, output: JarO
     @Suppress("UNCHECKED_CAST")
     val d2 = metadata.values[d2Idx] as? List<String> ?: return false
 
-    val d2Mapped = d2.map { remapOne(it, mapping, isHashed) }
+    val d2Mapped = d2.map { remapOne(it, mapping, isHashed, overrides) }
 
     if (d2Mapped == d2) return false
 
@@ -132,14 +145,23 @@ private fun remap(path: Path, mapping: TinyTree, isHashed: Boolean, output: JarO
     return true
 }
 
-private fun remapOne(mapping: String, mappingTree: TinyTree, isHashed: Boolean): String {
+private fun remapOne(
+    mapping: String,
+    mappingTree: TinyTree,
+    isHashed: Boolean,
+    overrides: Map<String, String>
+): String {
     var newSig = mapping
     while (newSig.contains("net/minecraft/" + if (isHashed) "unmapped/C_" else "class_")) {
         val firstUnmappedIdx = newSig.indexOf("net/minecraft/" + if (isHashed) "unmapped/C_" else "class_")
         val lastUnmappedIdx = newSig.indexOf(';', firstUnmappedIdx)
         val unmapped = newSig.substring(firstUnmappedIdx until lastUnmappedIdx)
-        val mapped = mappingTree.classes.find { it.getName(if (isHashed) "hashed" else "intermediary") == unmapped }
-            ?.getRawName("named")?.takeIf(String::isNotEmpty) ?: unmapped.replace("net", "ne\u0000t")
+        val mapped = overrides[unmapped]
+            ?: mappingTree.classes.find { it.getName(if (isHashed) "hashed" else "intermediary") == unmapped }
+                ?.getRawName("named")
+                ?.takeIf(String::isNotEmpty)
+            ?: unmapped.replace("net", "ne\u0000t")
+
         // the null byte is to prevent infinite loops
         // because either the class wasn't found or the class was found but was unmapped
         // and since this loop checks for unmapped classes, it could loop infinitely
